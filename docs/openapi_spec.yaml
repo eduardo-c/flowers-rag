@@ -1,0 +1,65 @@
+openapi: 3.1.0
+info:
+  title: Sistema RAG - Proyecto Final
+  version: 1.0.0
+paths:
+  /health:
+    get:
+      summary: Verifica el estado de la API y de ChromaDB.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: "ok" }
+                  chroma_accessible: { type: boolean, example: true }
+
+  /ingest:
+    post:
+      summary: Procesa el corpus, genera embeddings de Google AI y guarda en ChromaDB.
+      responses:
+        '200':
+          description: Indexación exitosa
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  documents_processed: { type: integer, example: 5 }
+                  chunks_indexed: { type: integer, example: 120 }
+
+  /query:
+    post:
+      summary: Realiza búsqueda k-NN y genera respuesta con Gemini.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [question]
+              properties:
+                question: { type: string, example: "¿Cuál es el costo de las rosas?" }
+                top_k: { type: integer, default: 3 }
+      responses:
+        '200':
+          description: Respuesta RAG o abstención.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  answer: { type: string }
+                  abstained: { type: boolean }
+                  citations:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        source: { type: string }
+                        text: { type: string }
+                        score: { type: number }
