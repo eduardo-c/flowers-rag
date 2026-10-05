@@ -6,7 +6,7 @@ Sistema de Generación Aumentada por Recuperación (RAG) construido con **Stream
 - **UI (Streamlit):** Cliente gráfico para cargar documentos y realizar preguntas con citas [n].
 - **API (FastAPI):** Servidor HTTP que orquesta la ingesta, búsqueda vectorial y generación.
 - **Base Vectorial (ChromaDB):** Almacenamiento persistente local en `./chroma`.
-- **Embeddings & LLM (Google AI Studio):** Modelo `text-embedding-004` para vectores y Gemini para generación anclada.
+- **Embeddings & LLM (Google AI Studio):** Modelo `gemini-embedding-001` para vectores y `gemini-3.5-flash` para generación anclada.
 
 ## 🚀 Requisitos Previos e Instalación
 

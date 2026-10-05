@@ -10,11 +10,16 @@ si se mezclaran modelos distintos, el k-NN no significaría nada.
 
 from __future__ import annotations
 
+import httpx
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
 
 from app.settings import Settings, get_settings
+
+# El SDK lanza la excepción de `httpx` cuando se agota `GOOGLE_TIMEOUT_SECONDS`: no es
+# un `APIError`, así que sin esto se escaparía como un 500 sin cuerpo.
+TIEMPO_ESPERADO = (TimeoutError, httpx.TimeoutException)
 
 
 class EmbeddingError(RuntimeError):
@@ -73,6 +78,11 @@ class GoogleAIEmbedder:
             raise EmbeddingError(
                 "google_ai_error",
                 f"Google AI falló al vectorizar con {self.model}: {exc}",
+            ) from exc
+        except TIEMPO_ESPERADO as exc:
+            raise EmbeddingError(
+                "google_ai_timeout",
+                f"Google AI tardó más de {self._settings.google_timeout_seconds} s en vectorizar.",
             ) from exc
 
         values = [list(item.values) for item in response.embeddings]

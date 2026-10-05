@@ -3,6 +3,8 @@ y los tipos internos descritos en `x-modulos`."""
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -85,3 +87,43 @@ class IngestResponse(BaseModel):
     sources: list[str]
     skipped: list[SkippedFile] = Field(default_factory=list)
     duration_ms: int = Field(ge=0)
+
+
+class QueryRequest(BaseModel):
+    """Esquema `QueryRequest` del spec.
+
+    `question` no lleva `min_length` para que una pregunta vacía o de solo espacios
+    llegue al endpoint y responda `400 empty_question`, y no un `422` genérico.
+    """
+
+    question: str = Field(max_length=2000, description="Pregunta en lenguaje natural.")
+    top_k: int | None = Field(
+        default=None, ge=1, le=10, description="Vecinos a recuperar; si falta, `TOP_K_DEFAULT`."
+    )
+    source: str | None = Field(
+        default=None, description="Filtro opcional por documento (reto opcional)."
+    )
+    min_score: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Umbral de similitud coseno; si falta, `MIN_SCORE_DEFAULT`.",
+    )
+
+
+class QueryResponse(BaseModel):
+    """Esquema `QueryResponse` del spec: respuesta RAG o abstención, ambas `200`.
+
+    `citations` van numeradas desde 1 y ese mismo número es el `[n]` que aparece en
+    `answer` (regla 03).
+    """
+
+    answer: str
+    abstained: bool
+    abstain_reason: Literal["sin_evidencia", "modelo_abstuvo"] | None = None
+    citations: list[RetrievedChunk] = Field(default_factory=list)
+    question_embedding_model: str
+    generation_model: str | None = None
+    top_k: int = Field(ge=1)
+    retrieval_ms: int = Field(ge=0)
+    generation_ms: int = Field(ge=0)

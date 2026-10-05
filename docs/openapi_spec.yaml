@@ -84,8 +84,8 @@ paths:
                     google_ai_key_configured: true
                     collection: flowers_catalog
                     chunks_in_index: 412
-                    embedding_model: text-embedding-004
-                    generation_model: gemini-2.0-flash
+                    embedding_model: gemini-embedding-001
+                    generation_model: gemini-3.5-flash
                 sin_chroma:
                   summary: La API vive pero Chroma no es accesible
                   value:
@@ -95,8 +95,8 @@ paths:
                     google_ai_key_configured: true
                     collection: flowers_catalog
                     chunks_in_index: 0
-                    embedding_model: text-embedding-004
-                    generation_model: gemini-2.0-flash
+                    embedding_model: gemini-embedding-001
+                    generation_model: gemini-3.5-flash
                 sin_clave:
                   summary: Chroma responde pero falta GOOGLE_API_KEY (503 en /ingest y /query)
                   value:
@@ -106,8 +106,8 @@ paths:
                     google_ai_key_configured: false
                     collection: flowers_catalog
                     chunks_in_index: 412
-                    embedding_model: text-embedding-004
-                    generation_model: gemini-2.0-flash
+                    embedding_model: gemini-embedding-001
+                    generation_model: gemini-3.5-flash
 
   /ingest:
     post:
@@ -172,7 +172,7 @@ paths:
                     chunks_indexed: 412
                     chunks_skipped: 0
                     collection: flowers_catalog
-                    embedding_model: text-embedding-004
+                    embedding_model: gemini-embedding-001
                     sources:
                       - data/catalogo_rosas.md
                       - data/catalogo_tulipanes.md
@@ -232,9 +232,11 @@ paths:
         En español, citando `[n]`, y absteniéndose si la evidencia no cubre.
 
         **Regla de abstención (dos capas, ambas visibles en la respuesta):**
-        * Capa determinista — si el índice está vacío, o ningún vecino alcanza
-          `min_score`, o `top_k` se resuelve a 0: `abstained: true`, `reason: "sin_evidencia"`,
-          sin llamada a Gemini y `citations: []`.
+        * Capa determinista — si ningún vecino alcanza `min_score`, o `top_k` se resuelve a 0:
+          `abstained: true`, `abstain_reason: "sin_evidencia"`, sin llamada a Gemini y
+          `citations: []`. El índice vacío no es una abstención sino el `503 empty_index`
+          declarado abajo: la UI necesita distinguir "no hay nada indexado" de
+          "no hay evidencia para esta pregunta".
         * Capa del modelo — si la evidencia no cubre la pregunta, Gemini devuelve
           la frase de abstención acordada y la API marca `reason: "modelo_abstuvo"`
           con las citas que sí se recuperaron.
@@ -294,8 +296,8 @@ paths:
                         page: null
                         text: 'Envío gratuito para pedidos superiores a 60 € en península.'
                         score: 0.61
-                    question_embedding_model: text-embedding-004
-                    generation_model: gemini-2.0-flash
+                    question_embedding_model: gemini-embedding-001
+                    generation_model: gemini-3.5-flash
                     top_k: 3
                     retrieval_ms: 412
                     generation_ms: 1180
@@ -306,7 +308,7 @@ paths:
                     abstained: true
                     abstain_reason: sin_evidencia
                     citations: []
-                    question_embedding_model: text-embedding-004
+                    question_embedding_model: gemini-embedding-001
                     generation_model: null
                     top_k: 3
                     retrieval_ms: 380
@@ -326,8 +328,8 @@ paths:
                         page: null
                         text: 'Las rosas se conservan entre 3 y 5 días en agua fresca.'
                         score: 0.52
-                    question_embedding_model: text-embedding-004
-                    generation_model: gemini-2.0-flash
+                    question_embedding_model: gemini-embedding-001
+                    generation_model: gemini-3.5-flash
                     top_k: 3
                     retrieval_ms: 401
                     generation_ms: 940
@@ -343,11 +345,16 @@ paths:
                     code: empty_question
                     hint: null
         '503':
-          description: Índice vacío, ChromaDB inaccesible o falta `GOOGLE_API_KEY`.
+          description: Índice vacío, ChromaDB inaccesible, falta `GOOGLE_API_KEY` o fallo de Gemini.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
               examples:
+                gemini_fallo:
+                  value:
+                    detail: 'Google AI falló al generar la respuesta con gemini-3.5-flash.'
+                    code: google_ai_error
+                    hint: 'Reintenta en unos segundos; si persiste, revisa la cuota en https://ai.dev/rate-limit.'
                 indice_vacio:
                   value:
                     detail: 'El índice está vacío. Ingesta documentos primero con POST /ingest.'
@@ -408,7 +415,7 @@ paths:
                       - path: data/envio_y_garantias.md
                         chunks: 72
                         title: Envío y garantías
-                    embedding_model: text-embedding-004
+                    embedding_model: gemini-embedding-001
                     embedding_dimension: 768
                     distance_metric: cosine
                     chunk_size: 320
@@ -485,10 +492,10 @@ components:
         embedding_model:
           type: string
           description: Modelo de Google AI usado para vectores de documentos y preguntas.
-          example: text-embedding-004
+          example: gemini-embedding-001
         generation_model:
           type: string
-          example: gemini-2.0-flash
+          example: gemini-3.5-flash
 
     IngestRequest:
       type: object
@@ -579,7 +586,7 @@ components:
         embedding_model:
           type: string
           description: Confirma que los vectores salieron de Google AI, no del embedder por defecto de ChromaDB.
-          example: text-embedding-004
+          example: gemini-embedding-001
         sources:
           type: array
           description: Rutas efectivamente indexadas; es la lista válida para el parámetro `source` de `/query`.
@@ -673,11 +680,11 @@ components:
         question_embedding_model:
           type: string
           description: Modelo usado para vectorizar la pregunta; debe coincidir con el de los chunks.
-          example: text-embedding-004
+          example: gemini-embedding-001
         generation_model:
           type: [string, 'null']
           description: Modelo Gemini usado; `null` si no se llegó a generar (abstención determinista).
-          example: gemini-2.0-flash
+          example: gemini-3.5-flash
         top_k:
           type: integer
           description: '`top_k` efectivo tras aplicar el máximo permitido.'
@@ -753,7 +760,7 @@ components:
               path: { type: string, example: data/catalogo_rosas.md }
               chunks: { type: integer, minimum: 0, example: 96 }
               title: { type: [string, 'null'], example: Catálogo de rosas }
-        embedding_model: { type: string, example: text-embedding-004 }
+        embedding_model: { type: string, example: gemini-embedding-001 }
         embedding_dimension:
           type: integer
           description: Dimensión del vector; si cambia, el índice antiguo es incompatible y hay que reindexar.
@@ -792,6 +799,7 @@ components:
             - missing_google_api_key
             - chroma_unavailable
             - empty_index
+            - google_ai_error
             - google_ai_timeout
             - source_not_found
             - internal_error
@@ -877,6 +885,30 @@ x-modulos:
       - 'Cada texto debe recibir exactamente un vector no vacío; si no, `EmbeddingError(invalid_response)`.'
       - 'Respeta el timeout `GOOGLE_TIMEOUT_SECONDS` vía `types.HttpOptions(timeout=...)` y lotes pequeños por la cuota.'
 
+  app/generate.py:
+    unica_responsabilidad: 'Redactar la respuesta en español a partir de los chunks recuperados, con citas `[n]`. No recupera ni vectoriza: no llama a ChromaDB ni a los embeddings.'
+    clase: GoogleAIResponder
+    constructor: 'GoogleAIResponder(settings=None, client=None) — `client` solo para inyección en pruebas.'
+    metodos:
+      - 'generate(question, citations) -> GenerationResult — `citations` son los `RetrievedChunk` ya filtrados por `min_score`; devuelve `answer` y `abstained`.'
+    prompt:
+      fuente: 'Idéntico a `x-arquitectura.generacion.prompt`. Estricto: solo evidencia, citas `[n]`, español y frase de abstención exacta.'
+    abstension:
+      deteccion: 'Si la respuesta de Gemini es la frase de abstención acordada, `GenerationResult.abstained = True` y el endpoint lo marca `modelo_abstuvo` conservando las citas recuperadas.'
+      frase: 'No encuentro en los documentos cargados información que responda a esa pregunta.'
+      prohibicion: 'El módulo no decide si hay evidencia: eso lo hace el endpoint antes de llamarlo (capa determinista, `sin_evidencia`).'
+    reglas:
+      - 'Los vectores y el texto los pone Gemini: nada de plantillas localmente rellenadas.'
+      - 'Los números `[n]` del prompt son los de `RetrievedChunk.index`, que es 1-based y coincide con `citations[index - 1]`.'
+      - 'Respeta el timeout `GOOGLE_TIMEOUT_SECONDS` vía `types.HttpOptions(timeout=...)`.'
+    errores:
+      GenerationError:
+        codes:
+          - 'missing_google_api_key — sin `GOOGLE_API_KEY`, antes de cualquier llamada.'
+          - 'google_ai_timeout — la API no respondió dentro del timeout -> `504 google_ai_timeout`.'
+          - 'google_ai_error — cualquier otro fallo de Gemini -> `503 google_ai_error`.'
+          - 'invalid_response — Gemini devolvió una respuesta vacía.'
+
   app/store.py:
     unica_responsabilidad: 'ChromaDB. No llama a Google AI ni genera texto.'
     regla_de_oro: |
@@ -931,12 +963,12 @@ x-arquitectura:
   embeddings:
     proveedor: Google AI Studio
     sdk: google-genai
-    modelo: text-embedding-004
+    modelo: gemini-embedding-001
     regla: 'El mismo modelo para documentos y preguntas; lotes pequeños para respetar la cuota.'
   generacion:
     proveedor: Google AI Studio
     sdk: google-genai
-    modelo: gemini-2.0-flash
+    modelo: gemini-3.5-flash
     prompt: |
       Eres un asistente que responde EXCLUSIVAMENTE con la evidencia proporcionada.
       Reglas:
@@ -955,8 +987,8 @@ x-arquitectura:
 
 x-configuracion-entorno:
   GOOGLE_API_KEY: 'Obligatoria. Secreto, solo en .env (ignorado por git).'
-  EMBEDDING_MODEL: 'text-embedding-004'
-  GENERATION_MODEL: 'gemini-2.0-flash'
+  EMBEDDING_MODEL: 'gemini-embedding-001'
+  GENERATION_MODEL: 'gemini-3.5-flash'
   CHROMA_PATH: ./chroma
   CHROMA_COLLECTION: flowers_catalog
   CHUNK_SIZE: '320'

@@ -11,9 +11,17 @@ from fastapi.responses import JSONResponse
 
 from app.chunk import ChunkingError, chunk_text, es_formato_soportado, extract_text
 from app.embed import EmbeddingError, GoogleAIEmbedder
-from app.models import HealthStatus, IngestRequest, IngestResponse, SkippedFile
+from app.generate import FRASE_ABSTENCION, GenerationError, GoogleAIResponder
+from app.models import (
+    HealthStatus,
+    IngestRequest,
+    IngestResponse,
+    QueryRequest,
+    QueryResponse,
+    SkippedFile,
+)
 from app.settings import get_settings
-from app.store import StoreError, add_chunks, count_chunks, ping
+from app.store import StoreError, add_chunks, count_chunks, ping, query_top_k
 
 API_VERSION = "1.0.0"
 
@@ -215,3 +223,114 @@ def _vaciar_indice(actual) -> None:
     ids = get_collection(actual).get(include=[])["ids"] or []
     if ids:
         get_collection(actual).delete(ids=ids)
+
+@app.post(
+    "/query",
+    response_model=QueryResponse,
+    tags=["consulta"],
+    operation_id="queryRag",
+    summary="Recupera top-k chunks en ChromaDB y genera una respuesta anclada con Gemini.",
+)
+async def consultar(requisito: QueryRequest = Body(...)) -> QueryResponse:
+    """Pregunta al corpus. Una abstención es un `200` de negocio, nunca un `500`."""
+    question = requisito.question.strip()
+    if not question:
+        raise ErrorApi(400, "La pregunta no puede estar vacía.", "empty_question")
+
+    actual = get_settings()
+    if not actual.key_configured:
+        raise ErrorApi(
+            503,
+            "GOOGLE_API_KEY no está configurada en el servidor.",
+            "missing_google_api_key",
+            "Obtén la clave en https://aistudio.google.com/apikey",
+        )
+    if not ping(actual):
+        raise ErrorApi(503, f"ChromaDB no está accesible en {actual.chroma_path}.", "chroma_unavailable")
+    if count_chunks(actual) == 0:
+        raise ErrorApi(
+            503, "El índice está vacío. Ingesta documentos primero con POST /ingest.", "empty_index"
+        )
+
+    top_k = requisito.top_k or actual.top_k_default
+    min_score = actual.min_score_default if requisito.min_score is None else requisito.min_score
+
+    inicio = time.perf_counter()
+    try:
+        vector = await GoogleAIEmbedder(actual).embed_query(question)
+        vecinos = await query_top_k(actual, vector, top_k, source=requisito.source)
+    except EmbeddingError as exc:
+        raise _error_de_embeddings(exc) from exc
+    except StoreError as exc:
+        raise ErrorApi(503, str(exc), "chroma_unavailable") from exc
+    retrieval_ms = _milis_desde(inicio)
+
+    # Capa determinista de la abstención: sin evidencia no se llama a Gemini.
+    evidencia = [vecino for vecino in vecinos if vecino.score >= min_score]
+    if not evidencia:
+        return QueryResponse(
+            answer=SIN_EVIDENCIA,
+            abstained=True,
+            abstain_reason="sin_evidencia",
+            citations=[],
+            question_embedding_model=actual.embedding_model,
+            generation_model=None,
+            top_k=top_k,
+            retrieval_ms=retrieval_ms,
+            generation_ms=0,
+        )
+
+    inicio = time.perf_counter()
+    try:
+        resultado = await GoogleAIResponder(actual).generate(question, evidencia)
+    except GenerationError as exc:
+        raise _error_de_generacion(exc) from exc
+
+    return QueryResponse(
+        answer=resultado.answer,
+        abstained=resultado.abstained,
+        abstain_reason="modelo_abstuvo" if resultado.abstained else None,
+        citations=evidencia,
+        question_embedding_model=actual.embedding_model,
+        generation_model=actual.generation_model,
+        top_k=top_k,
+        retrieval_ms=retrieval_ms,
+        generation_ms=_milis_desde(inicio),
+    )
+
+
+# --- apoyo de la consulta --------------------------------------------------------
+
+SIN_EVIDENCIA = (
+    "No tengo evidencia suficiente en el corpus indexado para responder a esa pregunta."
+)
+
+
+def _milis_desde(inicio: float) -> int:
+    return int((time.perf_counter() - inicio) * 1000)
+
+
+def _error_de_embeddings(exc: EmbeddingError) -> ErrorApi:
+    if exc.code == "missing_google_api_key":
+        return ErrorApi(503, str(exc), "missing_google_api_key")
+    if exc.code == "google_ai_timeout":
+        return ErrorApi(504, str(exc), "google_ai_timeout")
+    return ErrorApi(
+        503,
+        f"Google AI falló al vectorizar la pregunta: {exc}",
+        "google_ai_error",
+        "Reintenta en unos segundos; si persiste, revisa la cuota en https://ai.dev/rate-limit.",
+    )
+
+
+def _error_de_generacion(exc: GenerationError) -> ErrorApi:
+    if exc.code == "missing_google_api_key":
+        return ErrorApi(503, str(exc), "missing_google_api_key")
+    if exc.code == "google_ai_timeout":
+        return ErrorApi(504, str(exc), "google_ai_timeout")
+    return ErrorApi(
+        503,
+        f"Google AI falló al generar la respuesta: {exc}",
+        "google_ai_error",
+        "Reintenta en unos segundos; si persiste, revisa la cuota en https://ai.dev/rate-limit.",
+    )

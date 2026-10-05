@@ -62,8 +62,8 @@ def get_settings() -> Settings:
     key = os.getenv("GOOGLE_API_KEY", "").strip()
     return Settings(
         google_api_key=key or None,
-        embedding_model=_str("EMBEDDING_MODEL", "text-embedding-004"),
-        generation_model=_str("GENERATION_MODEL", "gemini-2.0-flash"),
+        embedding_model=_str("EMBEDDING_MODEL", "gemini-embedding-001"),
+        generation_model=_str("GENERATION_MODEL", "gemini-3.5-flash"),
         chroma_path=_str("CHROMA_PATH", "./chroma"),
         chroma_collection=_str("CHROMA_COLLECTION", "flowers_catalog"),
         chunk_size=_int("CHUNK_SIZE", 320),

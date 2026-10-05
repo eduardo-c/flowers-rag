@@ -44,7 +44,7 @@ async def test_health_ok_con_chroma_y_clave(api, health):
     assert health["chroma_accessible"] is True
     assert health["google_ai_key_configured"] is True
     assert health["collection"] == "test_flowers_catalog"
-    assert health["embedding_model"] == "text-embedding-004"
+    assert health["embedding_model"] == "gemini-embedding-001"
     assert health["generation_model"].startswith("gemini")
     assert health["version"] == "1.0.0"
     assert health["chunks_in_index"] == 0
