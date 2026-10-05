@@ -1,65 +1,874 @@
 openapi: 3.1.0
+
 info:
-  title: Sistema RAG - Proyecto Final
+  title: Sistema RAG — Catálogo de Flores y Listas de Precios
   version: 1.0.0
+  summary: Especificación formal del backend FastAPI del sistema RAG del proyecto final.
+  description: |
+    Contrato HTTP del sistema RAG. **Esta especificación es la fuente de verdad**
+    y precede a cualquier código de implementación (`app/`) y a las pruebas (`tests/`).
+
+    ## Capas y responsabilidades (arquitectura obligatoria de la rúbrica)
+
+    | Capa | Tecnología | Responsabilidad | Puede tocar |
+    |---|---|---|---|
+    | UI | Streamlit (`:8501`) | Cargar documentos, preguntar, mostrar respuesta + citas `[n]` + scores | **solo** HTTP a FastAPI |
+    | API | FastAPI (`:8000`) | Orquestar chunking, embeddings, k-NN y generación | Google AI, ChromaDB |
+    | Índice | ChromaDB (`./chroma`) | Persistencia de chunks + vectores, búsqueda k-NN | solo la API |
+    | Embeddings | Google AI (`google-genai`) | Vectorizar chunks **y** preguntas con el **mismo** modelo |_VECTORIZA. No genera texto_ |
+    | Generación | Gemini (`google-genai`) | Redactar respuesta anclada en la evidencia o abstenerse | — |
+
+    ## Reglas de diseño que esta especificación deja fijadas
+
+    1. **Un único proveedor de embeddings.** `EMBEDDING_MODEL` incrusta documentos y
+       preguntas. Está prohibido el embedder por defecto de ChromaDB: la API siempre
+       envía `embeddings=` calculados por Google AI.
+    2. **Recuperar antes de generar.** `/query` ejecuta siempre k-NN sobre ChromaDB y
+       solo después invoca a Gemini con los chunks numerados `[1]`, `[2]`, …
+    3. **Abstención es un resultado de primera clase**, no un error HTTP. Una pregunta
+       fuera de dominio responde `200` con `abstained: true` y un mensaje explícito.
+    4. **Sin 500 por pregunta fuera de dominio.** Los errores previsibles usan
+       `400`, `422`, `503` y `504` con un cuerpo `Error` uniforme.
+    5. **Persistencia.** La colección es un `PersistentClient` en `./chroma`;
+       reiniciar FastAPI no borra el índice.
+    6. **Aislamiento de la UI.** `ui/streamlit_app.py` no importa `app/` ni `chromadb`;
+       solo usa `httpx` contra `http://localhost:8000`.
+  contact:
+    name: Proyecto final — Sistema RAG
+  license:
+    name: Uso académico
+
+servers:
+  - url: http://localhost:8000
+    description: API local de desarrollo (FastAPI + Uvicorn)
+
+tags:
+  - name: salud
+    description: Estado del servicio y de sus dependencias.
+  - name: ingesta
+    description: Chunking + embeddings de Google AI + persistencia en ChromaDB.
+  - name: consulta
+    description: k-NN sobre ChromaDB + respuesta anclada de Gemini.
+  - name: índice
+    description: Inspección y mantenimiento de la colección (reto opcional).
+
+security: [] # Sin autenticación: la clave de Google AI vive solo en el entorno del servidor.
+
 paths:
   /health:
     get:
-      summary: Verifica el estado de la API y de ChromaDB.
+      tags: [salud]
+      operationId: healthCheck
+      summary: Confirma que la API vive y que ChromaDB es accesible.
+      description: |
+        Nunca lanza `500`. Si ChromaDB no responde, devuelve `200` con
+        `status: "degraded"` y `chroma_accessible: false`, para que la UI pueda
+        distinguir "API caída" de "índice no disponible".
       responses:
         '200':
-          description: OK
+          description: La API está viva. El estado de las dependencias va en el cuerpo.
           content:
             application/json:
-              schema:
-                type: object
-                properties:
-                  status: { type: string, example: "ok" }
-                  chroma_accessible: { type: boolean, example: true }
+              schema: { $ref: '#/components/schemas/HealthStatus' }
+              examples:
+                todo_ok:
+                  summary: API + Chroma + clave presentes
+                  value:
+                    status: ok
+                    version: 1.0.0
+                    chroma_accessible: true
+                    google_ai_key_configured: true
+                    collection: flowers_catalog
+                    chunks_in_index: 412
+                    embedding_model: text-embedding-004
+                    generation_model: gemini-2.0-flash
+                sin_chroma:
+                  summary: La API vive pero Chroma no es accesible
+                  value:
+                    status: degraded
+                    version: 1.0.0
+                    chroma_accessible: false
+                    google_ai_key_configured: true
+                    collection: flowers_catalog
+                    chunks_in_index: 0
+                    embedding_model: text-embedding-004
+                    generation_model: gemini-2.0-flash
 
   /ingest:
     post:
-      summary: Procesa el corpus, genera embeddings de Google AI y guarda en ChromaDB.
-      responses:
-        '200':
-          description: Indexación exitosa
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  documents_processed: { type: integer, example: 5 }
-                  chunks_indexed: { type: integer, example: 120 }
+      tags: [ingesta]
+      operationId: ingestDocuments
+      summary: Chunkifica, incrusta con Google AI y persiste en ChromaDB.
+      description: |
+        **Todos los vectores los produce Google AI.** El flujo es:
+        extracción de texto → `chunk.py` (trozos con solape) → `embed.py`
+        (lotes pequeños) → `store.py` (`add` con `embeddings=` propios).
 
-  /query:
-    post:
-      summary: Realiza búsqueda k-NN y genera respuesta con Gemini.
+        Acepta **cualquiera** de los dos modos declarados en `content`, y ambos
+        pueden combinarse en la misma petición:
+
+        * `multipart/form-data` — archivos subidos desde Streamlit (`files`).
+        * `application/json` — rutas dentro del servidor (`paths`), relativas a
+          `data/` por defecto.
+
+        Extensiones admitidas: `.md`, `.txt`, `.pdf` (con `pypdf`), `.csv`.
+        PDF escaneado sin capa de texto no se indexa: se cuenta en
+        `skipped` con motivo `sin_capa_de_texto` para no falsear el corpus.
       requestBody:
         required: true
         content:
           application/json:
-            schema:
-              type: object
-              required: [question]
-              properties:
-                question: { type: string, example: "¿Cuál es el costo de las rosas?" }
-                top_k: { type: integer, default: 3 }
+            schema: { $ref: '#/components/schemas/IngestRequest' }
+            examples:
+              rutas_del_servidor:
+                summary: Indexar la carpeta data/ del proyecto
+                value:
+                  paths: ['data/']
+                  reset: false
+              parametros_de_chunking:
+                summary: Forzar tamaño y solape distintos a los del entorno
+                value:
+                  paths: ['data/catalogo_rosas.md', 'data/precios_2026.csv']
+                  chunk_size: 320
+                  chunk_overlap: 64
+                  reset: true
+          multipart/form-data:
+            schema: { $ref: '#/components/schemas/IngestUploadRequest' }
+            encoding:
+              files:
+                contentType: text/markdown, text/plain, application/pdf, text/csv
+            examples:
+              carga_desde_streamlit:
+                summary: Formulario de subida de la UI
+                value:
+                  files: ['catalogo_rosas.md', 'lista_precios.csv']
+                  reset: false
       responses:
         '200':
-          description: Respuesta RAG o abstención.
+          description: Ingesta completada. Siempre `200`, aunque algunos archivos se omitan (mira `skipped`).
           content:
             application/json:
-              schema:
-                type: object
-                properties:
-                  answer: { type: string }
-                  abstained: { type: boolean }
-                  citations:
-                    type: array
-                    items:
-                      type: object
-                      properties:
-                        id: { type: string }
-                        source: { type: string }
-                        text: { type: string }
-                        score: { type: number }
+              schema: { $ref: '#/components/schemas/IngestResponse' }
+              examples:
+                exito:
+                  summary: 5 documentos, 412 chunks
+                  value:
+                    documents_processed: 5
+                    chunks_indexed: 412
+                    chunks_skipped: 0
+                    collection: flowers_catalog
+                    embedding_model: text-embedding-004
+                    sources:
+                      - data/catalogo_rosas.md
+                      - data/catalogo_tulipanes.md
+                      - data/precios_2026.csv
+                      - data/cuidado_iris.md
+                      - data/envio_y_garantias.md
+                    skipped: []
+                    duration_ms: 21430
+        '400':
+          description: No se recibió ningún archivo ni ruta legible.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                sin_entrada:
+                  value:
+                    detail: 'No se recibió ningún archivo ni ruta. Usa `files` (subida) o `paths` (rutas del servidor).'
+                    code: ingest_no_input
+                    hint: null
+        '413':
+          description: Algún archivo supera `max_file_bytes` (25 MB por defecto).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                archivo_grande:
+                  value:
+                    detail: 'El archivo `catalogo.pdf` supera el límite de 26214400 bytes.'
+                    code: file_too_large
+                    hint: 'Divide el PDF o eleva MAX_FILE_BYTES en el entorno.'
+        '503':
+          description: Falta `GOOGLE_API_KEY` o ChromaDB no está accesible; no se puede indexar.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                sin_clave:
+                  value:
+                    detail: 'GOOGLE_API_KEY no está configurada en el servidor.'
+                    code: missing_google_api_key
+                    hint: 'Copia .env.example a .env y define GOOGLE_API_KEY (https://aistudio.google.com/apikey).'
+                chroma_caido:
+                  value:
+                    detail: 'ChromaDB no está accesible en ./chroma.'
+                    code: chroma_unavailable
+                    hint: null
+
+  /query:
+    post:
+      tags: [consulta]
+      operationId: queryRag
+      summary: Recupera top-k chunks en ChromaDB y genera una respuesta anclada con Gemini.
+      description: |
+        Orden obligatorio: (1) incrustar la pregunta con `EMBEDDING_MODEL`,
+        (2) k-NN por coseno en ChromaDB, (3) filtro `MIN_SCORE`, (4) **solo
+        entonces** Gemini responde con los chunks numerados `[1]`, `[2]`, …
+        En español, citando `[n]`, y absteniéndose si la evidencia no cubre.
+
+        **Regla de abstención (dos capas, ambas visibles en la respuesta):**
+        * Capa determinista — si el índice está vacío, o ningún vecino alcanza
+          `min_score`, o `top_k` se resuelve a 0: `abstained: true`, `reason: "sin_evidencia"`,
+          sin llamada a Gemini y `citations: []`.
+        * Capa del modelo — si la evidencia no cubre la pregunta, Gemini devuelve
+          la frase de abstención acordada y la API marca `reason: "modelo_abstuvo"`
+          con las citas que sí se recuperaron.
+
+        El cliente (Streamlit) **nunca** recibe `500` por una pregunta fuera de
+        dominio: el resultado de abstención es un `200` de negocio.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/QueryRequest' }
+            examples:
+              pregunta_del_dominio:
+                summary: Consulta que sí tiene evidencia
+                value:
+                  question: '¿Cuál es el precio de un ramo de 20 rosas rojas y si incluye IVA?'
+                  top_k: 3
+              pregunta_fuera_de_dominio:
+                summary: Impossible de responder con el corpus → debe abstenerse
+                value:
+                  question: '¿Quién ganó el Mundial de fútbol de 1998 y con qué margen?'
+                  top_k: 3
+              con_filtro_de_fuente:
+                summary: Restringir la búsqueda a un documento (reto opcional)
+                value:
+                  question: '¿Cada cuánto se riegan las orquídeas?'
+                  top_k: 4
+                  source: data/cuidado_iris.md
+                  min_score: 0.45
+      responses:
+        '200':
+          description: Respuesta RAG o abstención (ambos son éxito de negocio).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QueryResponse' }
+              examples:
+                con_evidencia:
+                  summary: Respuesta anclada con citas
+                  value:
+                    answer: 'El ramo de 20 rosas rojas cuesta 89,90 € con IVA incluido [1]. El envío es gratuito a partir de 60 € [2].'
+                    abstained: false
+                    abstain_reason: null
+                    citations:
+                      - index: 1
+                        id: 'data/catalogo_rosas.md#chunk-004'
+                        source: data/catalogo_rosas.md
+                        title: Catálogo de rosas
+                        chunk_index: 4
+                        page: null
+                        text: 'Ramo de 20 rosas rojas — 89,90 € (IVA incluido).'
+                        score: 0.78
+                      - index: 2
+                        id: 'data/envio_y_garantias.md#chunk-001'
+                        source: data/envio_y_garantias.md
+                        title: Envío y garantías
+                        chunk_index: 1
+                        page: null
+                        text: 'Envío gratuito para pedidos superiores a 60 € en península.'
+                        score: 0.61
+                    question_embedding_model: text-embedding-004
+                    generation_model: gemini-2.0-flash
+                    top_k: 3
+                    retrieval_ms: 412
+                    generation_ms: 1180
+                abstain_por_score:
+                  summary: Ningún chunk alcanza min_score → abstención sin llamar a Gemini
+                  value:
+                    answer: 'No tengo evidencia suficiente en el corpus indexado para responder a esa pregunta.'
+                    abstained: true
+                    abstain_reason: sin_evidencia
+                    citations: []
+                    question_embedding_model: text-embedding-004
+                    generation_model: null
+                    top_k: 3
+                    retrieval_ms: 380
+                    generation_ms: 0
+                abstain_por_modelo:
+                  summary: Hay chunks parecidos pero no responden la pregunta
+                  value:
+                    answer: 'No encuentro en los documentos cargados información que responda a esa pregunta.'
+                    abstained: true
+                    abstain_reason: modelo_abstuvo
+                    citations:
+                      - index: 1
+                        id: 'data/catalogo_rosas.md#chunk-002'
+                        source: data/catalogo_rosas.md
+                        title: Catálogo de rosas
+                        chunk_index: 2
+                        page: null
+                        text: 'Las rosas se conservan entre 3 y 5 días en agua fresca.'
+                        score: 0.52
+                    question_embedding_model: text-embedding-004
+                    generation_model: gemini-2.0-flash
+                    top_k: 3
+                    retrieval_ms: 401
+                    generation_ms: 940
+        '400':
+          description: '`question` vacía o solo con espacios.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                vacia:
+                  value:
+                    detail: 'La pregunta no puede estar vacía.'
+                    code: empty_question
+                    hint: null
+        '503':
+          description: Índice vacío, ChromaDB inaccesible o falta `GOOGLE_API_KEY`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                indice_vacio:
+                  value:
+                    detail: 'El índice está vacío. Ingesta documentos primero con POST /ingest.'
+                    code: empty_index
+                    hint: null
+                sin_clave:
+                  value:
+                    detail: 'GOOGLE_API_KEY no está configurada en el servidor.'
+                    code: missing_google_api_key
+                    hint: 'Obtén la clave en https://aistudio.google.com/apikey'
+        '504':
+          description: Google AI no respondió a tiempo (embeddings o generación).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                timeout:
+                  value:
+                    detail: 'Google AI tardó más de 30 s en responder.'
+                    code: google_ai_timeout
+                    hint: null
+
+  /index:
+    get:
+      tags: [índice]
+      operationId: getIndexStats
+      summary: Estado del índice (cobertura de la UI y verificación de persistencia).
+      description: |
+        Sirve para el estado vacío de la UI, para el reporte de una página y para
+        demostrar que el índice sobrevive a un reinicio de FastAPI. Extensión
+        opcional de la rúbrica.
+      responses:
+        '200':
+          description: Metadatos de la colección.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IndexStats' }
+              examples:
+                con_datos:
+                  value:
+                    collection: flowers_catalog
+                    persist_path: ./chroma
+                    chunks: 412
+                    documents: 5
+                    sources:
+                      - path: data/catalogo_rosas.md
+                        chunks: 96
+                        title: Catálogo de rosas
+                      - path: data/catalogo_tulipanes.md
+                        chunks: 88
+                        title: Catálogo de tulipanes
+                      - path: data/precios_2026.csv
+                        chunks: 64
+                        title: Lista de precios 2026
+                      - path: data/cuidado_iris.md
+                        chunks: 92
+                        title: guía de cuidado del iris
+                      - path: data/envio_y_garantias.md
+                        chunks: 72
+                        title: Envío y garantías
+                    embedding_model: text-embedding-004
+                    embedding_dimension: 768
+                    distance_metric: cosine
+                    chunk_size: 320
+                    chunk_overlap: 64
+        '503':
+          description: ChromaDB inaccesible.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /index/sources/{source}:
+    delete:
+      tags: [índice]
+      operationId: deleteSource
+      summary: Borra los chunks de un documento sin recrear la colección.
+      description: |
+        Extensión opcional de la rúbrica ("borrar o reindexar un documento sin
+        reconstruir toda la colección"). `source` es la ruta tal como se indexó,
+        URL-encodificada. Es idempotente: borrar una fuente ausente devuelve `200`
+        con `chunks_deleted: 0`.
+      parameters:
+        - $ref: '#/components/parameters/SourcePath'
+      responses:
+        '200':
+          description: Borrado completado.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeleteSourceResponse' }
+              examples:
+                borrado:
+                  value:
+                    source: data/catalogo_tulipanes.md
+                    chunks_deleted: 88
+                    chunks_remaining: 324
+        '503':
+          description: ChromaDB inaccesible.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+components:
+  schemas:
+
+    HealthStatus:
+      type: object
+      description: Salud de la API y de sus dos dependencias (ChromaDB y Google AI).
+      required: [status, version, chroma_accessible, google_ai_key_configured, collection, chunks_in_index, embedding_model, generation_model]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+          description: '`ok` = todo accesible; `degraded` = la API vive pero ChromaDB no responde.'
+          example: ok
+        version:
+          type: string
+          example: 1.0.0
+        chroma_accessible:
+          type: boolean
+          description: Resultado de un ping al `PersistentClient` de `./chroma`.
+          example: true
+        google_ai_key_configured:
+          type: boolean
+          description: Si existe `GOOGLE_API_KEY` en el entorno del servidor (nunca se devuelve la clave).
+          example: true
+        collection:
+          type: string
+          description: Nombre de la colección de ChromaDB.
+          example: flowers_catalog
+        chunks_in_index:
+          type: integer
+          minimum: 0
+          description: Chunks persistidos ahora mismo; 0 tras un reinicio = índice perdido (no debe ocurrir).
+          example: 412
+        embedding_model:
+          type: string
+          description: Modelo de Google AI usado para vectores de documentos y preguntas.
+          example: text-embedding-004
+        generation_model:
+          type: string
+          example: gemini-2.0-flash
+
+    IngestRequest:
+      type: object
+      description: Modo JSON — indexar documentos que ya están en el disco del servidor.
+      properties:
+        paths:
+          type: array
+          description: Rutas de archivo o carpeta, relativas a la raíz del proyecto (o absolutas).
+          items: { type: string }
+          minItems: 1
+          examples:
+            - ['data/']
+            - ['data/catalogo_rosas.md', 'data/precios_2026.csv']
+        chunk_size:
+          type: integer
+          minimum: 100
+          maximum: 1000
+          default: 320
+          description: 'Palabras por chunk (rango de la rúbrica: 200–400).'
+          example: 320
+        chunk_overlap:
+          type: integer
+          minimum: 0
+          description: 'Palabras de solape entre chunks consecutivos (rango de la rúbrica: 40–80). `0` desactiva el solape.'
+          default: 64
+          example: 64
+        reset:
+          type: boolean
+          default: false
+          description: Si `true`, vacía la colección antes de indexar (reindexado limpio).
+      required: [paths]
+
+    IngestUploadRequest:
+      type: object
+      description: Modo multipart — archivos subidos desde Streamlit.
+      required: [files]
+      properties:
+        files:
+          type: array
+          minItems: 1
+          description: Binarios de los documentos (.md, .txt, .pdf, .csv). Se guardan en `data/uploads/` y se indexan con `source` = esa ruta.
+          items:
+            type: string
+            format: binary
+        paths:
+          type: array
+          description: Rutas adicionales del servidor a incluir en la misma ingesta.
+          items: { type: string }
+        chunk_size:
+          type: integer
+          minimum: 100
+          maximum: 1000
+          default: 320
+        chunk_overlap:
+          type: integer
+          minimum: 0
+          default: 64
+        reset:
+          type: boolean
+          default: false
+
+    IngestResponse:
+      type: object
+      description: Resultado de la ingesta. `chunks_indexed` es el número de vectores de Google AI guardados en ChromaDB.
+      required: [documents_processed, chunks_indexed, collection, embedding_model, sources]
+      properties:
+        documents_processed:
+          type: integer
+          minimum: 0
+          description: Documentos leídos y troceados con éxito.
+          example: 5
+        chunks_indexed:
+          type: integer
+          minimum: 0
+          description: Chunks (y por tanto embeddings) escritos en la colección.
+          example: 412
+        chunks_skipped:
+          type: integer
+          minimum: 0
+          default: 0
+          description: Chunks no indexados por estar vacíos o superar el límite de tokens del modelo.
+          example: 0
+        collection:
+          type: string
+          example: flowers_catalog
+        embedding_model:
+          type: string
+          description: Confirma que los vectores salieron de Google AI, no del embedder por defecto de ChromaDB.
+          example: text-embedding-004
+        sources:
+          type: array
+          description: Rutas efectivamente indexadas; es la lista válida para el parámetro `source` de `/query`.
+          items: { type: string }
+          example: ['data/catalogo_rosas.md', 'data/precios_2026.csv']
+        skipped:
+          type: array
+          description: Archivos omitidos con el motivo; la ingesta no es atómica, así que se reportan en lugar de fallar.
+          items: { $ref: '#/components/schemas/SkippedFile' }
+        duration_ms:
+          type: integer
+          minimum: 0
+          description: Duración total; útil para ver si el cuello es la cuota de la API de Google AI.
+          example: 21430
+
+    SkippedFile:
+      type: object
+      required: [source, reason]
+      properties:
+        source: { type: string, example: 'data/escaneado.pdf' }
+        reason:
+          type: string
+          enum: [sin_capa_de_texto, formato_no_soportado, vacio, ilegible, demasiado_grande]
+          example: sin_capa_de_texto
+
+    QueryRequest:
+      type: object
+      required: [question]
+      properties:
+        question:
+          type: string
+          minLength: 1
+          maxLength: 2000
+          description: Pregunta en lenguaje natural. Se recorta; si queda vacía, `400 empty_question`.
+          examples:
+            - '¿Cuál es el precio de un ramo de 20 rosas rojas y si incluye IVA?'
+            - '¿Quién ganó el Mundial de fútbol de 1998?'
+        top_k:
+          type: integer
+          minimum: 1
+          maximum: 10
+          default: 3
+          description: 'Vecinos a recuperar de ChromaDB. Rango razonable según rúbrica: 2–5.'
+          example: 3
+        source:
+          type: string
+          description: 'Filtro opcional por documento (reto opcional): restringe el k-NN a los chunks de ese `source`.'
+          example: data/cuidado_iris.md
+        min_score:
+          type: number
+          minimum: 0.0
+          maximum: 1.0
+          description: |
+            Umbral de similitud coseno (score = 1 − distancia coseno) por debajo del cual
+            **no hay evidencia**. Default `MIN_SCORE` del entorno. Si ningún vecino lo
+            alcanza, la API se abstiene sin llamar a Gemini.
+          default: 0.35
+          example: 0.35
+
+    QueryResponse:
+      type: object
+      required: [answer, abstained, abstain_reason, citations]
+      properties:
+        answer:
+          type: string
+          description: |
+            Texto en español generado por Gemini **solo** con los chunks dados. Debe
+            incluir citas `[n]` que correspondan a `citations[index - 1]`. Si
+            `abstained` es `true`, dice explícitamente que no hay evidencia suficiente
+            y no rellena con conocimiento paramétrico.
+          examples:
+            - 'El ramo de 20 rosas cuesta 89,90 € con IVA incluido [1].'
+            - 'No tengo evidencia suficiente en el corpus indexado para responder a esa pregunta.'
+        abstained:
+          type: boolean
+          description: '`true` = el sistema se abstuvo. Es una respuesta válida, no un error.'
+          example: false
+        abstain_reason:
+          type: [string, 'null']
+          description: Motivo de la abstención; `null` cuando `abstained` es `false`.
+          enum: [sin_evidencia, modelo_abstuvo, indice_vacio, modelo_sin_clave, error_generacion, 'null']
+          examples: [sin_evidencia, modelo_abstuvo, null]
+        citations:
+          type: array
+          description: |
+            Chunks recuperados, ordenados por score descendente y **numerados desde 1**
+            con la misma `index` que aparece como `[n]` en `answer`. En la abstención por
+            score van vacíos; en la abstención por modelo conservan lo recuperado para que
+            la UI muestre por qué se abstuvo.
+          items: { $ref: '#/components/schemas/Citation' }
+        question_embedding_model:
+          type: string
+          description: Modelo usado para vectorizar la pregunta; debe coincidir con el de los chunks.
+          example: text-embedding-004
+        generation_model:
+          type: [string, 'null']
+          description: Modelo Gemini usado; `null` si no se llegó a generar (abstención determinista).
+          example: gemini-2.0-flash
+        top_k:
+          type: integer
+          description: '`top_k` efectivo tras aplicar el máximo permitido.'
+          example: 3
+        retrieval_ms:
+          type: integer
+          minimum: 0
+          example: 412
+        generation_ms:
+          type: integer
+          minimum: 0
+          example: 1180
+
+    Citation:
+      type: object
+      description: 'Evidencia visible en la UI: texto, origen y score.'
+      required: [index, id, source, text, score]
+      properties:
+        index:
+          type: integer
+          minimum: 1
+          description: 'Número de cita `[n]` tal como aparece en `answer`.'
+          example: 1
+        id:
+          type: string
+          description: Identificador estable del chunk en ChromaDB (`{source}#chunk-{i}`).
+          example: 'data/catalogo_rosas.md#chunk-004'
+        source:
+          type: string
+          description: Ruta del documento de origen (metadato `source` de la rúbrica).
+          example: data/catalogo_rosas.md
+        title:
+          type: [string, 'null']
+          description: Metadato opcional `title`.
+          example: Catálogo de rosas
+        chunk_index:
+          type: integer
+          minimum: 0
+          description: Posición del chunk dentro del documento.
+          example: 4
+        page:
+          type: [integer, 'null']
+          minimum: 1
+          description: Metadato opcional `page` (solo PDF); `null` en otros formatos.
+          example: null
+        text:
+          type: string
+          description: Contenido del chunk, tal cual se envió a Gemini.
+          example: 'Ramo de 20 rosas rojas — 89,90 € (IVA incluido).'
+        score:
+          type: number
+          format: double
+          description: 'Similitud coseno pregunta↔chunk. Más alto = más relevante. Umbral de abstención: `min_score`.'
+          example: 0.78
+
+    IndexStats:
+      type: object
+      required: [collection, persist_path, chunks, documents, sources, embedding_model, embedding_dimension, distance_metric, chunk_size, chunk_overlap]
+      properties:
+        collection: { type: string, example: flowers_catalog }
+        persist_path:
+          type: string
+          description: Ruta del `PersistentClient`; debe sobrevivir a un reinicio de FastAPI.
+          example: ./chroma
+        chunks: { type: integer, minimum: 0, example: 412 }
+        documents: { type: integer, minimum: 0, example: 5 }
+        sources:
+          type: array
+          items:
+            type: object
+            required: [path, chunks]
+            properties:
+              path: { type: string, example: data/catalogo_rosas.md }
+              chunks: { type: integer, minimum: 0, example: 96 }
+              title: { type: [string, 'null'], example: Catálogo de rosas }
+        embedding_model: { type: string, example: text-embedding-004 }
+        embedding_dimension:
+          type: integer
+          description: Dimensión del vector; si cambia, el índice antiguo es incompatible y hay que reindexar.
+          example: 768
+        distance_metric:
+          type: string
+          enum: [cosine]
+          example: cosine
+        chunk_size: { type: integer, example: 320 }
+        chunk_overlap: { type: integer, example: 64 }
+
+    DeleteSourceResponse:
+      type: object
+      required: [source, chunks_deleted, chunks_remaining]
+      properties:
+        source: { type: string, example: data/catalogo_tulipanes.md }
+        chunks_deleted: { type: integer, minimum: 0, example: 88 }
+        chunks_remaining: { type: integer, minimum: 0, example: 324 }
+
+    Error:
+      type: object
+      description: Cuerpo de error uniforme de la API. `code` es estable y sirve para que la UI elija el mensaje.
+      required: [detail, code]
+      properties:
+        detail:
+          type: string
+          description: Mensaje legible en español.
+          example: 'GOOGLE_API_KEY no está configurada en el servidor.'
+        code:
+          type: string
+          description: Identificador estable del error.
+          enum:
+            - empty_question
+            - ingest_no_input
+            - file_too_large
+            - missing_google_api_key
+            - chroma_unavailable
+            - empty_index
+            - google_ai_timeout
+            - source_not_found
+            - internal_error
+          example: missing_google_api_key
+        hint:
+          type: [string, 'null']
+          description: Acción sugerida para el usuario (p. ej. cómo obtener la clave).
+          example: 'Obtén la clave en https://aistudio.google.com/apikey'
+
+  parameters:
+    SourcePath:
+      name: source
+      in: path
+      required: true
+      description: Ruta del documento tal como se indexó, URL-encodificada (ej. `data%2Fprecios_2026.csv`).
+      schema:
+        type: string
+      examples:
+        archivo:
+          value: data%2Fcatalogo_rosas.md
+
+  responses: {}
+
+x-arquitectura:
+  ui:
+    tecnologia: Streamlit
+    puerto: 8501
+    regla: 'Habla solo HTTP con FastAPI vía httpx; prohibido importar `app/` o `chromadb`.'
+  api:
+    tecnologia: FastAPI
+    puerto: 8000
+    comando: 'uvicorn app.main:app --reload --port 8000'
+    cors: 'Orígenes permitidos por defecto: http://localhost:8501, http://127.0.0.1:8501'
+    docs: 'GET /docs y GET /openapi.json'
+  index:
+    tecnologia: ChromaDB
+    cliente: PersistentClient
+    ruta: ./chroma
+    coleccion: flowers_catalog
+    metadatos_por_chunk: [source, title, chunk_index, page]
+    add: 'collections.add(ids, documents, metadatas, embeddings=<Google AI>)  # nunca sin `embeddings`'
+    query: 'collections.query(query_embeddings=[<Google AI>], n_results=top_k, where={source})'
+  embeddings:
+    proveedor: Google AI Studio
+    sdk: google-genai
+    modelo: text-embedding-004
+    regla: 'El mismo modelo para documentos y preguntas; lotes pequeños para respetar la cuota.'
+  generacion:
+    proveedor: Google AI Studio
+    sdk: google-genai
+    modelo: gemini-2.0-flash
+    prompt: |
+      Eres un asistente que responde EXCLUSIVAMENTE con la evidencia proporcionada.
+      Reglas:
+      1. Usa solo los fragmentos [1]..[n]. No uses conocimiento propio.
+      2. Cita cada afirmación con [n] usando exactamente esos números.
+      3. Responde siempre en español.
+      4. Si la evidencia no responde a la pregunta, responde exactamente
+         "No encuentro en los documentos cargados información que responda a esa pregunta."
+         y nada más.
+    frase_de_abstencion: 'No encuentro en los documentos cargados información que responda a esa pregunta.'
+  chunking:
+    unidad: palabras
+    chunk_size: 320
+    chunk_overlap: 64
+    razon: 'Solape del 20 % para que un dato no quede cortado entre dos chunks ni se pierda en el k-NN.'
+
+x-configuracion-entorno:
+  GOOGLE_API_KEY: 'Obligatoria. Secreto, solo en .env (ignorado por git).'
+  EMBEDDING_MODEL: 'text-embedding-004'
+  GENERATION_MODEL: 'gemini-2.0-flash'
+  CHROMA_PATH: ./chroma
+  CHROMA_COLLECTION: flowers_catalog
+  CHUNK_SIZE: '320'
+  CHUNK_OVERLAP: '64'
+  TOP_K_DEFAULT: '3'
+  MIN_SCORE_DEFAULT: '0.35'
+  MAX_FILE_BYTES: '26214400'
+  EMBED_BATCH_SIZE: '16'
+  GOOGLE_TIMEOUT_SECONDS: '30'
+  ALLOWED_ORIGINS: 'http://localhost:8501,http://127.0.0.1:8501'
+
+x-trazabilidad-rubrica:
+  '1-2': '/health'
+  '3-4-5': 'POST /ingest (multipart o JSON) + corpus en data/'
+  '6-8': 'POST /query + GET /index'
+  '9': 'No 500 por pregunta fuera de dominio: abstención en 200 + errores 4xx/503 documentados'
+  '10': '/query devuelve citations con score = 1 - distancia coseno'
+  '11': 'x-arquitectura.embeddings: mismo modelo para indexar y para preguntar'
+  '12-13': 'QueryRequest.min_score + abstain_reason sin_evidencia | modelo_abstuvo'
+  '14': 'IngestUploadRequest.files (subida desde Streamlit)'
+  '15': 'QueryRequest.question'
+  '16': 'QueryResponse.citations con source y score + Citation.text'
+  '17': 'HealthStatus, Error.code y los estados vacíos de la UI'
+  '18': 'IngestResponse.embedding_model lo deja explícito'
+  '19-20': 'Rutas ./chroma y .env; CORS en x-arquitectura.api'
+  '21': 'README.md documenta venv, clave, ambos servidores y una pregunta de prueba'
