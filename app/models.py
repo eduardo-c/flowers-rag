@@ -44,3 +44,44 @@ class RetrievedChunk(BaseModel):
     title: str | None = None
     chunk_index: int | None = None
     page: int | None = None
+
+
+class IngestRequest(BaseModel):
+    """Esquema `IngestRequest` del spec: ingesta por rutas del servidor (modo JSON).
+
+    `paths` es opcional para que una petición sin entrada llegue al endpoint y
+    responda `400 ingest_no_input`, en lugar de un `422` de validación genérico.
+    """
+
+    paths: list[str] = Field(
+        default_factory=list,
+        description="Rutas de archivo o carpeta, relativas a la raíz del proyecto (o absolutas).",
+        examples=[["data/"]],
+    )
+    chunk_size: int | None = Field(
+        default=None, ge=100, le=1000, description="Palabras por chunk; si falta, `CHUNK_SIZE`."
+    )
+    chunk_overlap: int | None = Field(
+        default=None, ge=0, description="Palabras de solape; si falta, `CHUNK_OVERLAP`."
+    )
+    reset: bool = Field(default=False, description="Si `true`, vacía la colección antes de indexar.")
+
+
+class SkippedFile(BaseModel):
+    """Esquema `SkippedFile` del spec: archivo omitido y motivo."""
+
+    source: str
+    reason: str
+
+
+class IngestResponse(BaseModel):
+    """Esquema `IngestResponse` del spec."""
+
+    documents_processed: int = Field(ge=0)
+    chunks_indexed: int = Field(ge=0)
+    chunks_skipped: int = Field(default=0, ge=0)
+    collection: str
+    embedding_model: str
+    sources: list[str]
+    skipped: list[SkippedFile] = Field(default_factory=list)
+    duration_ms: int = Field(ge=0)

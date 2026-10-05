@@ -492,7 +492,10 @@ components:
 
     IngestRequest:
       type: object
-      description: Modo JSON — indexar documentos que ya están en el disco del servidor.
+      description: |
+        Modo JSON — indexar documentos que ya están en el disco del servidor.
+        `paths` no es obligatorio en el esquema para que una petición sin rutas llegue al
+        endpoint y devuelva el `400 ingest_no_input` declarado, no un `422` genérico.
       properties:
         paths:
           type: array
@@ -519,7 +522,6 @@ components:
           type: boolean
           default: false
           description: Si `true`, vacía la colección antes de indexar (reindexado limpio).
-      required: [paths]
 
     IngestUploadRequest:
       type: object
@@ -836,6 +838,29 @@ x-modulos:
     proposito: 'Vecino recuperado por k-NN; se serializa tal cual en `citations[]` de `POST /query`.'
     campos: '[index, id, source, title, chunk_index, page, text, score]'
     score: 'Similitud coseno = `1 - distancia` de Chroma; `index` es 1-based y coincide con el `[n]` de la respuesta.'
+
+  app/chunk.py:
+    unica_responsabilidad: 'Leer un documento y trocearlo en palabras con solape. No llama a Google AI ni a ChromaDB.'
+    unidad: palabras
+    regla_de_solape: |
+      `stride = chunk_size - chunk_overlap`: las últimas `chunk_overlap` palabras de un
+      chunk son las primeras del siguiente. Así un dato que cae en el borde entre dos
+      trozos sigue completo en uno de los dos, y al concatenarlos no se pierde nada.
+    funciones:
+      - 'es_formato_soportado(path) -> bool — extensión admitida.'
+      - 'extract_text(path) -> str — texto plano de `.md`, `.txt`, `.csv` y `.pdf` (con `pypdf`).'
+      - 'chunk_text(text, *, chunk_size, chunk_overlap, source, title=None, page=None) -> list[Chunk] — un `Chunk` por trozo, `chunk_index` desde 0 y `source` como clave de filtro en Chroma.'
+    reglas:
+      - 'Trozado en palabras, no en caracteres: los tokens cambian según el idioma y la versión del modelo.'
+      - 'Texto vacío -> `[]`; la ingesta lo reporta en `skipped` con motivo `vacio` en vez de indexar un chunk en blanco.'
+      - 'PDF sin capa de texto -> `ChunkingError(sin_capa_de_texto)`: no se indexa para no falsear el corpus.'
+    errores:
+      ChunkingError:
+        codes:
+          - 'formato_no_soportado — extensión fuera de `.md`, `.txt`, `.csv`, `.pdf`.'
+          - 'ilegible — no existe, no se puede leer o el PDF está corrupto.'
+          - 'sin_capa_de_texto — PDF escaneado sin texto extraíble.'
+          - 'vacio — el archivo no tiene texto.'
 
   app/embed.py:
     clase: GoogleAIEmbedder

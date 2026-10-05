@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+import time
+from pathlib import Path
 
-from app.models import HealthStatus
+from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from app.chunk import ChunkingError, chunk_text, es_formato_soportado, extract_text
+from app.embed import EmbeddingError, GoogleAIEmbedder
+from app.models import HealthStatus, IngestRequest, IngestResponse, SkippedFile
 from app.settings import get_settings
-from app.store import ping
+from app.store import StoreError, add_chunks, count_chunks, ping
 
 API_VERSION = "1.0.0"
 
@@ -26,6 +32,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class ErrorApi(HTTPException):
+    """Error con el cuerpo plano del esquema `Error`: `{detail, code, hint}`."""
+
+    def __init__(self, status_code: int, detail: str, code: str, hint: str | None = None) -> None:
+        super().__init__(status_code=status_code, detail=detail)
+        self.code = code
+        self.hint = hint
+
+
+@app.exception_handler(ErrorApi)
+async def _cuerpo_de_error(request: Request, exc: ErrorApi) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail, "code": exc.code, "hint": exc.hint},
+    )
 
 
 @app.get(
@@ -60,3 +83,135 @@ def health() -> HealthStatus:
         embedding_model=current.embedding_model,
         generation_model=current.generation_model,
     )
+
+
+@app.post(
+    "/ingest",
+    response_model=IngestResponse,
+    tags=["ingesta"],
+    operation_id="ingestDocuments",
+    summary="Chunkifica, incrusta con Google AI y persiste en ChromaDB.",
+)
+async def ingest_documentos(requisito: IngestRequest = Body(...)) -> IngestResponse:
+    """Trocea los documentos, vectoriza cada trozo con Google AI y lo guarda en Chroma.
+
+    Siempre `200`: lo que no se puede indexar se devuelve en `skipped` con su motivo,
+    porque la ingesta no es atómica y es preferible indexar el resto.
+    """
+    actual = get_settings()
+    if not requisito.paths:
+        raise ErrorApi(
+            400,
+            "No se recibió ningún archivo ni ruta. Usa `files` (subida) o `paths` (rutas del servidor).",
+            "ingest_no_input",
+        )
+    if not actual.key_configured:
+        raise ErrorApi(
+            503,
+            "GOOGLE_API_KEY no está configurada en el servidor.",
+            "missing_google_api_key",
+            "Copia .env.example a .env y define GOOGLE_API_KEY (https://aistudio.google.com/apikey).",
+        )
+    if not ping(actual):
+        raise ErrorApi(503, f"ChromaDB no está accesible en {actual.chroma_path}.", "chroma_unavailable")
+    if requisito.reset:
+        _vaciar_indice(actual)
+
+    embedder = GoogleAIEmbedder(actual)
+    chunk_size = requisito.chunk_size or actual.chunk_size
+    chunk_overlap = requisito.chunk_overlap or actual.chunk_overlap
+
+    procesados: list[str] = []
+    omitidos: list[SkippedFile] = []
+    chunks_indexed = 0
+    inicio = time.perf_counter()
+
+    for ruta in _rutas_a_indexar(requisito.paths):
+        source = _source_de(ruta)
+        try:
+            _comprobar_tamano(ruta, actual)
+            trozos = chunk_text(
+                extract_text(ruta),
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                source=source,
+                title=Path(ruta).stem,
+            )
+        except ChunkingError as exc:
+            omitidos.append(SkippedFile(source=source, reason=exc.code))
+            continue
+
+        try:
+            vectores = await embedder.embed_documents([trozo.text for trozo in trozos])
+            await add_chunks(actual, trozos, vectores)
+        except (EmbeddingError, StoreError) as exc:
+            omitidos.append(SkippedFile(source=source, reason=exc.code))
+            continue
+
+        procesados.append(source)
+        chunks_indexed += len(trozos)
+
+    return IngestResponse(
+        documents_processed=len(procesados),
+        chunks_indexed=chunks_indexed,
+        chunks_skipped=0,
+        collection=actual.chroma_collection,
+        embedding_model=actual.embedding_model,
+        sources=procesados,
+        skipped=omitidos,
+        duration_ms=int((time.perf_counter() - inicio) * 1000),
+    )
+
+
+# --- apoyo de la ingesta ---------------------------------------------------------
+
+
+def _rutas_a_indexar(paths: list[str]) -> list[Path]:
+    """Archivos a procesar: los indicados y, si son carpetas, los admitidos dentro.
+
+    Una ruta explícita se conserva aunque no exista o no sea indexable, para que el
+    error aparezca en `skipped`. Dentro de una carpeta solo se recorren los formatos
+    admitidos: no es un error que un `data/` tenga un `.DS_Store`.
+    """
+    rutas: list[Path] = []
+    for bruto in paths:
+        ruta = Path(bruto).expanduser()
+        if not ruta.is_absolute():
+            ruta = Path.cwd() / ruta
+        if ruta.is_dir():
+            rutas.extend(
+                hijo
+                for hijo in sorted(ruta.rglob("*"))
+                if hijo.is_file() and es_formato_soportado(hijo)
+            )
+        else:
+            rutas.append(ruta)
+    return rutas
+
+
+def _source_de(ruta: Path) -> str:
+    """`source` es la clave de filtro en Chroma: ruta relativa al proyecto si puede ser."""
+    raiz = Path(__file__).resolve().parents[1]
+    try:
+        return ruta.resolve().relative_to(raiz).as_posix()
+    except ValueError:
+        return ruta.as_posix()
+
+
+def _comprobar_tamano(ruta: Path, actual) -> None:
+    if ruta.is_file() and ruta.stat().st_size > actual.max_file_bytes:
+        raise ChunkingError(
+            "demasiado_grande",
+            f"El archivo `{ruta.name}` supera el límite de {actual.max_file_bytes} bytes.",
+        )
+
+
+def _vaciar_indice(actual) -> None:
+    """`reset: true`: deja la colección vacía antes de indexar."""
+    if count_chunks(actual) == 0:
+        return
+    from app.store import get_collection
+
+    ids = get_collection(actual).get(include=[])["ids"] or []
+    if ids:
+        get_collection(actual).delete(ids=ids)
