@@ -123,3 +123,26 @@ async def test_health_cumple_el_esquema_del_spec(health):
     jsonschema.validate(instance=health, schema=schema)
     assert set(schema["required"]) == REQUIRED_FIELDS
     assert health["status"] in schema["properties"]["status"]["enum"]
+
+
+async def test_un_fallo_inesperado_devuelve_el_cuerpo_error_uniforme(monkeypatch):
+    """La spec declara `internal_error`: ni un 500 pelado de FastAPI."""
+    import httpx
+
+    import app.main as main
+
+    def revienta(_):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(main, "ping", revienta)
+    app = main.app
+    # `raise_app_exceptions=False` para ver la respuesta en vez de la excepción.
+    transporte = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transporte, base_url="http://test") as cliente:
+        respuesta = await cliente.get("/health")
+
+    assert respuesta.status_code == 500
+    cuerpo = respuesta.json()
+    assert cuerpo["code"] == "internal_error"
+    assert cuerpo["detail"]
+    assert "hint" in cuerpo

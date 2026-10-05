@@ -21,7 +21,7 @@ streamlit==1.65.0
 # nunca el embedder por defecto de ChromaDB.
 chromadb==1.5.9
 
-# --- Google AI Studio: embeddings (text-embedding-004) y generacion (Gemini) --
+# --- Google AI Studio: embeddings (gemini-embedding-001) y generacion (gemini-3.5-flash) --
 google-genai==2.28.0
 
 # --- Utilidades --------------------------------------------------------------

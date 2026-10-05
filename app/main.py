@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 
 from app.chunk import ChunkingError, chunk_text, es_formato_soportado, extract_text
 from app.embed import EmbeddingError, GoogleAIEmbedder
-from app.generate import FRASE_ABSTENCION, GenerationError, GoogleAIResponder
+from app.generate import GenerationError, GoogleAIResponder
 from app.models import (
     HealthStatus,
     IngestRequest,
@@ -59,6 +59,23 @@ async def _cuerpo_de_error(request: Request, exc: ErrorApi) -> JSONResponse:
     )
 
 
+@app.exception_handler(Exception)
+async def _error_inesperado(request: Request, exc: Exception) -> JSONResponse:
+    """Red de seguridad: cualquier fallo inesperado conserva el cuerpo `Error` del spec.
+
+    Sin esto FastAPI devuelve su `{"detail": "Internal Server Error"}` pelado, que no
+    cumple el esquema `Error` ni da a la UI un `code` con el que decidir el mensaje.
+    """
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": "Error interno del servidor.",
+            "code": "internal_error",
+            "hint": "Revisa el log del servidor; si persiste, reindexa con POST /ingest.",
+        },
+    )
+
+
 @app.get(
     "/health",
     response_model=HealthStatus,
@@ -73,8 +90,6 @@ def health() -> HealthStatus:
 
     chunks = 0
     if chroma_accessible:
-        from app.store import count_chunks
-
         try:
             chunks = count_chunks(current)
         except Exception:
@@ -223,6 +238,7 @@ def _vaciar_indice(actual) -> None:
     ids = get_collection(actual).get(include=[])["ids"] or []
     if ids:
         get_collection(actual).delete(ids=ids)
+
 
 @app.post(
     "/query",

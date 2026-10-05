@@ -26,7 +26,10 @@ import httpx
 import streamlit as st
 
 API_URL = os.getenv("API_URL", "http://localhost:8000")
-CARPETA_SUBIDAS = Path(__file__).resolve().parents[1] / "data" / "uploads"
+# `UPLOADS_DIR` permite aislar la carpeta en pruebas y despliegues; por defecto `data/uploads`.
+CARPETA_SUBIDAS = Path(
+    os.getenv("UPLOADS_DIR") or Path(__file__).resolve().parents[1] / "data" / "uploads"
+)
 FORMATOS = ("md", "txt", "pdf", "csv")
 TIMEOUT_S = 120.0
 

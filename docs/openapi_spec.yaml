@@ -416,7 +416,7 @@ paths:
                         chunks: 72
                         title: Envío y garantías
                     embedding_model: gemini-embedding-001
-                    embedding_dimension: 768
+                    embedding_dimension: 3072
                     distance_metric: cosine
                     chunk_size: 320
                     chunk_overlap: 64
@@ -764,7 +764,7 @@ components:
         embedding_dimension:
           type: integer
           description: Dimensión del vector; si cambia, el índice antiguo es incompatible y hay que reindexar.
-          example: 768
+          example: 3072
         distance_metric:
           type: string
           enum: [cosine]

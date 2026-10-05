@@ -13,6 +13,8 @@ from tests.fakes import FakeClient
 pytestmark = pytest.mark.anyio
 
 DOCUMENTO = "data/01_cuidados_y_temporadas_rosas.md"
+# Dimensión arbitraria del doble de pruebas: la API real nunca se llama aquí.
+# El modelo real (gemini-embedding-001) devuelve 3072; ver `dimension_mismatch`.
 DIMENSION = 768
 
 

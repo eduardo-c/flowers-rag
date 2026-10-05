@@ -205,9 +205,12 @@ def ui(servidor, tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def app_test(ui):
+def app_test(ui, tmp_path, monkeypatch):
     from streamlit.testing.v1 import AppTest
 
+    # `AppTest` re-ejecuta el script, así que `UPLOADS_DIR` debe apuntar al temporal:
+    # si no, la prueba escribiría en el `data/uploads/` real del repositorio.
+    monkeypatch.setenv("UPLOADS_DIR", str(tmp_path / "uploads"))
     # `st.cache_resource` es global: sin limpiarlo el cliente HTTP del test anterior
     # (apuntando a un servidor ya parado) se reutiliza y todo falla.
     st_cache_resource_clear()
