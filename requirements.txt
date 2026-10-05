@@ -31,3 +31,5 @@ pypdf==6.19.0
 # --- Pruebas -----------------------------------------------------------------
 pytest==9.1.1
 httpx==0.28.1
+# Plugin de pytest para las pruebas async con httpx.AsyncClient + ASGITransport.
+anyio==4.15.1

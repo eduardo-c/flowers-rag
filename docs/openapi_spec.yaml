@@ -61,9 +61,13 @@ paths:
       operationId: healthCheck
       summary: Confirma que la API vive y que ChromaDB es accesible.
       description: |
-        Nunca lanza `500`. Si ChromaDB no responde, devuelve `200` con
-        `status: "degraded"` y `chroma_accessible: false`, para que la UI pueda
-        distinguir "API caída" de "índice no disponible".
+        Nunca lanza `500`. Es el endpoint que la UI consulta primero para distinguir
+        "API caída" de "índice no disponible" o "falta la clave".
+
+        `status` es `"ok"` solo si **ChromaDB responde** y **`GOOGLE_API_KEY` está
+        configurada**. En cualquier otro caso es `"degraded"` con `200`, y el campo
+        concreto (`chroma_accessible` / `google_ai_key_configured`) dice cuál falla.
+        La clave nunca se devuelve, solo un booleano.
       responses:
         '200':
           description: La API está viva. El estado de las dependencias va en el cuerpo.
@@ -91,6 +95,17 @@ paths:
                     google_ai_key_configured: true
                     collection: flowers_catalog
                     chunks_in_index: 0
+                    embedding_model: text-embedding-004
+                    generation_model: gemini-2.0-flash
+                sin_clave:
+                  summary: Chroma responde pero falta GOOGLE_API_KEY (503 en /ingest y /query)
+                  value:
+                    status: degraded
+                    version: 1.0.0
+                    chroma_accessible: true
+                    google_ai_key_configured: false
+                    collection: flowers_catalog
+                    chunks_in_index: 412
                     embedding_model: text-embedding-004
                     generation_model: gemini-2.0-flash
 
@@ -445,7 +460,7 @@ components:
         status:
           type: string
           enum: [ok, degraded]
-          description: '`ok` = todo accesible; `degraded` = la API vive pero ChromaDB no responde.'
+          description: '`ok` = Chroma responde y hay clave. `degraded` = la API vive pero falta Chroma o la clave.'
           example: ok
         version:
           type: string
