@@ -224,6 +224,9 @@ __marimo__/
 # Index and Persistence of the Vector Database (Generated when running /ingest)
 chroma/
 
+# Documents uploaded from the Streamlit sidebar (written by ui/streamlit_app.py)
+data/uploads/
+
 # OS generated files
 .DS_Store
 Thumbs.db

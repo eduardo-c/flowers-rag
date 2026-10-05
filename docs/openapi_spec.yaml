@@ -945,7 +945,36 @@ x-arquitectura:
   ui:
     tecnologia: Streamlit
     puerto: 8501
+    comando: 'streamlit run ui/streamlit_app.py --server.port 8501'
     regla: 'Habla solo HTTP con FastAPI vía httpx; prohibido importar `app/` o `chromadb`.'
+    estructura:
+      - 'Barra lateral: subida de documentos y botón de indexado contra `POST /ingest`.'
+      - 'Chat principal: `st.chat_input` → `POST /query`, con historial en `st.session_state`.'
+      - 'Cada respuesta muestra la respuesta de Gemini y, debajo, las citas `[n]` con `source`, `score` y `text`.'
+    subida_de_archivos:
+      modo: 'json'
+      detalle: |
+        La UI **no** envía `multipart/form-data`: escribe cada archivo subido en
+        `data/uploads/` y llama a `POST /ingest` con el modo JSON (`paths`). Así la UI
+        necesita una sola ruta HTTP y el backend no depende de que el navegador y el
+        servidor compartan sistema de archivos.
+      carpeta_destino: data/uploads
+      request:
+        method: POST
+        path: /ingest
+        content_type: application/json
+        body: { paths: ['data/uploads/catalogo.md'], chunk_size: 320, chunk_overlap: 64, reset: false }
+    consultas:
+      - endpoint: POST /query
+        body: '{question, top_k, min_score, source?}'
+      - endpoint: GET /health
+        para: 'Banner de estado con `status`, `chunks_in_index`, `embedding_model` y `generation_model`.'
+    codigos_de_error_que_la_ui_trata:
+      missing_google_api_key: 'Aviso con el `hint` de la API: cómo definir GOOGLE_API_KEY.'
+      empty_index: 'Aviso de que hay que indexar documentos antes de preguntar.'
+      chroma_unavailable: 'Aviso de que la API no ve ChromaDB.'
+      google_ai_timeout: 'Aviso de cuota/latencia: reintentar en unos segundos.'
+      google_ai_error: 'Aviso de error de Google AI con el `detail` de la API.'
   api:
     tecnologia: FastAPI
     puerto: 8000
