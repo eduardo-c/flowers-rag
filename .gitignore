@@ -1,6 +1,7 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
+*.pyc
 *$py.class
 
 # C extensions
@@ -218,3 +219,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Index and Persistence of the Vector Database (Generated when running /ingest)
+chroma/
+
+# OS generated files
+.DS_Store
+Thumbs.db
