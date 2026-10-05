@@ -813,6 +813,77 @@ components:
 
   responses: {}
 
+x-modulos:
+  descripcion: |
+    Contratos internos de `app/`. La especificación HTTP de arriba es la que ve
+    el cliente; esta sección fija las funciones que la implementan, para que
+    `embed.py` y `store.py` se puedan probar por separado (regla 02) sin HTTP.
+
+  Chunk:
+    modulo: app/models.py
+    proposito: 'Trozo de documento indexable; los metadatos van a Chroma.'
+    campos:
+      source: 'string — ruta del documento (obligatorio, es la clave de filtro)'
+      text: 'string — contenido del chunk (obligatorio, no vacío)'
+      chunk_index: 'integer >= 0 — posición dentro del documento'
+      title: 'string | null — metadato opcional'
+      page: 'integer | null — metadato opcional para PDF'
+    metadatos_en_chroma: '[source, title, chunk_index, page] — los `None` se omiten: Chroma no acepta valores nulos.'
+    id_generado: '`{source}#chunk-{chunk_index:03d}`, p. ej. `data/precios.csv#chunk-004`.'
+
+  RetrievedChunk:
+    modulo: app/models.py
+    proposito: 'Vecino recuperado por k-NN; se serializa tal cual en `citations[]` de `POST /query`.'
+    campos: '[index, id, source, title, chunk_index, page, text, score]'
+    score: 'Similitud coseno = `1 - distancia` de Chroma; `index` es 1-based y coincide con el `[n]` de la respuesta.'
+
+  app/embed.py:
+    clase: GoogleAIEmbedder
+    unica_responsabilidad: 'Convertir texto en vectores con Google AI. Prohibido cualquier backend local (FastText, BERT, sentence-transformers, fastembed, bag-of-words).'
+    constructor: 'GoogleAIEmbedder(settings=None, client=None) — `client` solo para inyección en pruebas.'
+    metodos:
+      - 'embed_documents(texts: list[str]) -> list[list[float]] — en lotes de `EMBED_BATCH_SIZE`. Lista vacía -> `[]` sin llamar a la API.'
+      - 'embed_query(text: str) -> list[float] — un único vector, **el mismo modelo** que los documentos. Texto vacío -> `ValueError`.'
+      - 'dimension -> int | None — dimensión del último vector recibido; si una respuesta cambia de dimensión, `EmbeddingError(invalid_response)`.'
+    reglas:
+      - 'El modelo sale de `EMBEDDING_MODEL` y es el único usado para documentos y preguntas.'
+      - 'Sin `GOOGLE_API_KEY` -> `EmbeddingError(missing_google_api_key)` antes de cualquier llamada.'
+      - 'Error o timeout de la API -> `EmbeddingError(google_ai_error)`; nunca se degrada a otro backend ni se devuelve un vector falso.'
+      - 'Cada texto debe recibir exactamente un vector no vacío; si no, `EmbeddingError(invalid_response)`.'
+      - 'Respeta el timeout `GOOGLE_TIMEOUT_SECONDS` vía `types.HttpOptions(timeout=...)` y lotes pequeños por la cuota.'
+
+  app/store.py:
+    unica_responsabilidad: 'ChromaDB. No llama a Google AI ni genera texto.'
+    regla_de_oro: |
+      **Los embeddings entran calculados desde fuera.** `add_chunks` y `query_top_k`
+      exigen el vector como parámetro obligatorio y la colección se crea siempre con
+      `embedding_function=None`, para no activar el embedder por defecto de ChromaDB
+      (all-MiniLM), que es explícitamente prohibido en este proyecto.
+    sincronia: |
+      El cliente de Chroma es bloqueante, así que las operaciones de datos son `async` y
+      delegan el trabajo real a un hilo (`anyio.to_thread`) para no bloquear el event loop.
+      `ping` y `count_chunks` son **síncronas**: las consume el endpoint síncrono `GET /health`.
+    funciones:
+      - 'get_client(settings) -> chromadb.ClientAPI — `PersistentClient` sobre `CHROMA_PATH` (por defecto `./chroma`), cacheado por (ruta, colección).'
+      - 'get_collection(settings, create=True) -> Collection — coseno, `embedding_function=None`. Con `create=False` no crea nada.'
+      - 'async add_chunks(settings, chunks, embeddings) -> list[str] — `embeddings` es obligatorio (sin valor por defecto); devuelve los ids añadidos (`[]` si no hay chunks). Valida nº de vectores, no vacío y dimensión uniforme.'
+      - 'async query_top_k(settings, embedding, top_k, source=None) -> list[RetrievedChunk] — `query_embeddings=[embedding]`, `where={"source": source}` si se filtra, score = `1 - distancia`, orden descendente. Exige el vector por parámetro.'
+      - 'async delete_source(settings, source) -> int — borra por metadato; idempotente (0 si no existe).'
+      - 'count_chunks(settings) -> int — `0` si la colección no existe.'
+      - 'ping(settings) -> bool — `False` si Chroma no es accesible; nunca propaga la excepción.'
+      - 'reset_clients() -> None — olvida los clientes cacheados (reinicio de FastAPI y pruebas).'
+    errores:
+      StoreError:
+        codes:
+          - 'embeddings_missing — lista de embeddings vacía o `None`.'
+          - 'embeddings_count_mismatch — un vector por chunk, ni más ni menos.'
+          - 'embeddings_ragged — vectores con longitudes distintas.'
+          - 'dimension_mismatch — el vector de la pregunta no tiene la dimensión de la colección (habría que reindexar).'
+          - 'chroma_unavailable — ChromaDB no responde.'
+    persistencia: |
+      El índice vive en `./chroma`. Reiniciar FastAPI (o limpiar la caché de clientes)
+      no borra nada: los chunks y los vectores se releen del disco.
+
 x-arquitectura:
   ui:
     tecnologia: Streamlit
