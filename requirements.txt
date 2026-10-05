@@ -1,0 +1,33 @@
+# Dependencias del Sistema RAG — Proyecto Final
+# Python 3.10 o superior (probado con 3.13.9 en macOS).
+#
+#   python3 -m venv venv
+#   source venv/bin/activate        # Windows: venv\Scripts\activate
+#   pip install -r requirements.txt
+#
+# Stack obligatorio de la rubrica: FastAPI + Streamlit + ChromaDB + Google AI.
+
+# --- API (FastAPI) -----------------------------------------------------------
+fastapi==0.142.2
+uvicorn==0.54.0
+# Obligatoria para que FastAPI acepte las subidas multipart/form-data de /ingest.
+python-multipart==0.0.32
+
+# --- UI (Streamlit) ----------------------------------------------------------
+streamlit==1.65.0
+
+# --- Indice vectorial (ChromaDB) --------------------------------------------
+# PersistentClient sobre ./chroma. Los embeddings los calcula Google AI,
+# nunca el embedder por defecto de ChromaDB.
+chromadb==1.5.9
+
+# --- Google AI Studio: embeddings (text-embedding-004) y generacion (Gemini) --
+google-genai==2.28.0
+
+# --- Utilidades --------------------------------------------------------------
+python-dotenv==1.2.4
+pypdf==6.19.0
+
+# --- Pruebas -----------------------------------------------------------------
+pytest==9.1.1
+httpx==0.28.1
